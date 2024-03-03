@@ -1,0 +1,561 @@
+---
+title: "Course Project Description"
+output: html_document
+date: "2024-03-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+<center><font size="+2">Abstract</font></center>
+
+In this project, I first collected data from 18 sessions and conducted exploratory data analysis. Then, I combined the data from all 18 sessions into one dataset, resulting in 5081 trials. I built three models using logistic regression and stepwise regression. After testing them on sessions 1 and 18, I found that Model 3 performed the best.
+
+# Introduction
+
+This project analyzed a subset of data from the experiment conducted by Steinmetz et al. In 2019, 10 mice were involved in 39 treatment courses. During these processes, visual stimuli were presented to mice on dual screens and their neural activity towards these stimuli was recorded. Mice make decisions based on visual stimuli, use front paw controlled wheels, and receive corresponding feedback. Specifically, the focus of this study is on spike training data from the start of stimulation to 0.4 seconds after stimulation, involving four mice: Corey, Frossman, and therefore, Ledelberg. This analysis aims to gain a deeper understanding of the neural mechanisms involved in the decision-making process of visual stimuli.
+
+# Exploratory analysis
+
+```{r, message=FALSE}
+# install.packages("ROCR")
+suppressWarnings(library(tidyverse))
+suppressWarnings(library(dplyr))
+suppressWarnings(library(caret)) 
+suppressWarnings(library(ROCR))
+suppressWarnings(library(knitr))
+suppressWarnings(library(kableExtra))
+suppressWarnings(library(MASS))
+```
+
+
+## Dataset
+
+A total of 18 RDS files are provided that contain the experiment records from 18 sessions on 5 mice. I will begin my analysis by summarizing the information from the sessions.
+
+```{r echo=TRUE, eval=TRUE}
+path <- getwd()
+setwd(path)
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('./Data/session',i,'.rds',sep=''))
+  # print(session[[i]]$mouse_name)
+  # print(session[[i]]$date_exp)
+}
+names(session[[1]])
+```
+
+```{r}
+summary(session[[3]])
+```
+
+In Session 3, the dataset comprises various components: contrast_left and contrast_right, representing the contrast levels of stimuli presented on the left and right sides respectively; feedback_type, observed 228 times, indicating the type of feedback; mouse_name is the name of the mouse involved; brain_area, consisting of 619 unique values; date_exp is the date of the experiment; spks, numbers of spikes of neurons in the visual cortex in time bins; and time, centers of the time bins for spks.
+
+
+
+Summarize the brain areas and overall success rates:
+
+```{r}
+# feedback_type
+n_session <- length(session)
+
+n_trial <- sum(sapply(session, function(x) length(x$feedback_type)))
+n_success <- sum(sapply(session, function(x) sum(x$feedback_type == 1)))
+
+n_success / n_trial
+```
+
+Over 70\% trials are success.
+
+
+```{r}
+# brain area
+area <- unique(unlist(lapply(session, function(x) unique(x$brain_area))))
+
+n_area <- length(area)
+n_area
+```
+There are 62 levels in brain area.
+
+
+Next, by summarizing across sessions, we can gain insights into the characteristics of the dataset. For example, it includes the number of mice involved in the experiments, the time span of the experiments, the diversity of brain areas, the quantity of neurons, and the success rates. It helps us to have more knowledge of the data structure.
+
+```{r}
+# Summarize the information across sessions:
+
+# Knowing what summary we want to report, we can create a tibble:
+# All values in this function serve only as place holders
+
+n.session=length(session)
+
+# in library tidyverse
+meta <- tibble(
+  mouse_name = rep('name',n.session),
+  date_exp =rep('dt',n.session),
+  n_brain_area = rep(0,n.session),
+  n_neurons = rep(0,n.session),
+  n_trials = rep(0,n.session),
+  success_rate = rep(0,n.session)
+)
+
+
+for(i in 1:n.session){
+  tmp = session[[i]];
+  meta[i,1]=tmp$mouse_name;
+  meta[i,2]=tmp$date_exp;
+  meta[i,3]=length(unique(tmp$brain_area));
+  meta[i,4]=dim(tmp$spks[[1]])[1];
+  meta[i,5]=length(tmp$feedback_type);
+  meta[i,6]=mean(tmp$feedback_type+1)/2;
+}
+
+kable(meta, format = "html", table.attr = "class='table table-striped'", digits = 2, caption = "Summary of the Information Across Sessions")
+
+
+```
+
+
+
+## Session
+
+Let's take a look at Session 6. 
+
+The `r length(session[[6]]$brain_area)` neurons in Session 6 are located in `r unique(session[[6]]$brain_area)` of the mouse brain. We can visualize the activities of these areas across the `r length(session[[6]]$feedback_type)` trials. 
+
+Here I take the average number of spikes across neurons in each area as the activities and start my analysis on one trial. 
+
+I defineed a function named `average_spike_area` that calculates the average spike count for each brain area in a given trial of a session. Then, it tests the function with Session 6 and Trial 1.
+
+```{r}
+average_spike_area<-function(i.t,this_session){
+  spk.trial = this_session$spks[[i.t]]
+  area= this_session$brain_area
+  spk.count=apply(spk.trial,1,sum)
+  spk.average.tapply=tapply(spk.count, area, mean)
+  return(spk.average.tapply)
+  }
+
+
+i.s=6 # indicator for this session
+
+i.t=1 # indicator for this trial 
+# Test the function
+average_spike_area(1,this_session = session[[i.s]])
+```
+
+The output provides the average spike count for each brain area (AUD, CA1, root, SSp, TH). We can see that the CA1 area has a notably higher average spike count compared to other areas like AUD and SSp.
+
+
+The purpose of this code is to create a dataframe containing the average spike counts for each brain area, feedback type, two contrasts, and trial ID.
+
+```{r}
+n.trial=length(session[[i.s]]$feedback_type)
+n.area=length(unique(session[[i.s]]$brain_area ))
+# Alternatively, you can extract these information in the meta that we created before.
+
+# We will create a data frame that contain the average spike counts for each area, feedback type,  the two contrasts, and the trial id
+
+trial.summary =matrix(nrow=n.trial,ncol= n.area+1+2+1)
+for(i.t in 1:n.trial){
+  trial.summary[i.t,]=c(average_spike_area(i.t,this_session = session[[i.s]]),
+                          session[[i.s]]$feedback_type[i.t],
+                        session[[i.s]]$contrast_left[i.t],
+                        session[[i.s]]$contrast_right[i.s],
+                        i.t)
+}
+
+colnames(trial.summary)=c(names(average_spike_area(i.t,this_session = session[[i.s]])), 'feedback', 'left contr.','right contr.','id' )
+
+# Turning it into a data frame
+trial.summary <- as_tibble(trial.summary)
+ 
+```
+
+From the average spike counts in each brain area, we can understand which brain regions are most active when stimulated.
+
+```{r}
+area.col=rainbow(n=n.area,alpha=0.7)
+# In base R, I usually initiate a blank plot before drawing anything on it
+plot(x=1,y=0, col='white',xlim=c(0,n.trial),ylim=c(0,1.5), xlab="Trials",ylab="Average spike counts", main=paste("Spikes per area in Session", i.s))
+
+
+for(i in 1:n.area){
+  lines(y=trial.summary[[i]],x=trial.summary$id,col=area.col[i],lty=2,lwd=1)
+  lines(smooth.spline(trial.summary$id, trial.summary[[i]]),col=area.col[i],lwd=3)
+  }
+legend("topright", 
+  legend = colnames(trial.summary)[1:n.area], 
+  col = area.col, 
+  lty = 1, 
+  cex = 0.8
+)
+
+```
+CA1 has the highest average spike counts. However, there is a decreasing trend as the number of experiments increases. The root region has relatively higher average spike counts and shows  fluctuating patterns. The average spike counts in the other three regions are similar. But AUD shows a flat trend and is not affected by the number of experiments.
+
+
+## Trial
+
+At the trial level, we can visualize the activities of all neurons in this session. 
+
+```{r}
+
+plot.trial<-function(i.t,area, area.col,this_session){
+    
+    spks=this_session$spks[[i.t]];
+    n.neuron=dim(spks)[1]
+    time.points=this_session$time[[i.t]]
+    
+    plot(0,0,xlim=c(min(time.points),max(time.points)),ylim=c(0,n.neuron+1),col='white', xlab='Time (s)',yaxt='n', ylab='Neuron', main=paste('Trial ',i.t, 'feedback', this_session$feedback_type[i.t] ),cex.lab=1.5)
+    for(i in 1:n.neuron){
+        i.a=which(area== this_session$brain_area[i]);
+        col.this=area.col[i.a]
+        
+        ids.spike=which(spks[i,]>0) # find out when there are spikes 
+        if( length(ids.spike)>0 ){
+            points(x=time.points[ids.spike],y=rep(i, length(ids.spike) ),pch='.',cex=2, col=col.this)
+        }
+      
+            
+    }
+    
+legend("topright", 
+  legend = area, 
+  col = area.col, 
+  pch = 16, 
+  cex = 0.8
+  )
+  }
+    
+```
+
+
+
+```{r, fig.width=8, fig.height=8}
+varname=names(trial.summary);
+area=varname[1:(length(varname)-4)]
+par(mfrow=c(1,2))
+plot.trial(1,area, area.col,session[[i.s]])
+plot.trial(2,area, area.col,session[[i.s]])
+
+par(mfrow=c(1,1))
+```
+
+From the graph, it is clear that the neurons in the root and CA1 regions exhibit the most frequent activity. Within the first 0.4 seconds, there are no significant differences in neuronal activity.
+
+# Data integration
+
+From the project description, we can see that the ultimate goal of the course project is to predict the outcome in the test set that contains 100 trials from Session 1 and Session 18. However, as we see from Milestone I, data structure differs across sessions. For instance, Session 1 contains 734 neurons from 8 brain areas, where Session 2 contains 1070 neurons from 5 brain areas. 
+
+Then I used the Benchmark method. It can ignore the information about specific neurons by averaging over their activities. In particular, for each trial, I first take the summation of spikes for each neuron, which results in a vector that contains the total number of spikes for all neurons during the 0.4 seconds in that trial; then, we take the average of the total number of spikes, which results in one number that is the average spike counts during that trial. Finally, I calculated the number of neurons that has spikes and computed the average number of spikes among active neurons.
+
+```{r}
+# create an empty dataframe
+session_bench <- data.frame(matrix(ncol = 9, nrow = 0))
+
+# loop through each session
+for (i in 1:length(session)) {
+  n_obs <- length(session[[i]]$feedback_type)
+  mouse_name <- session[[i]]$mouse_name
+  date_exp <- session[[i]]$date_exp
+  n_brain_area <- length(unique(session[[i]]$brain_area))
+
+  # loop through each trail
+  for (j in 1:n_obs) {
+    spks.trial <- session[[i]]$spks[[j]]
+    
+    # total spikes for each neuron
+    total.spikes <- apply(spks.trial, 1, sum)
+    
+    # average spikes per neuron
+    avg.spikes <- mean(total.spikes)
+    
+    # average spikes per active neuron
+    active_neurons <- sum(total.spikes > 0)
+    avg.active_neuron_spks <- sum(total.spikes) / active_neurons
+    
+    
+    # create a vector containing the current trial's data
+    current_trial <- c(i, mouse_name, date_exp, session[[i]]$contrast_left[j], session[[i]]$contrast_right[j], n_brain_area, avg.spikes, avg.active_neuron_spks, session[[i]]$feedback_type[[j]])
+    
+    session_bench <- rbind(session_bench, current_trial)
+  }
+}
+
+# View the results
+colnames(session_bench) <- c("session_ID", "mouse_name", "date_exp", "contrast_left", "contrast_right", "n_brain_area", "avg_spikes", "avg_active_neuron_spks", "feedback_type")
+session_bench$feedback_type <- as.factor(session_bench$feedback_type)
+head(session_bench)
+# DataFrame
+write.csv(session_bench, "session_bench.csv", row.names = FALSE)
+rm(list = ls())
+session_bench <- read_csv('session_bench.csv')
+session_bench$feedback_type <- as.factor(session_bench$feedback_type)
+```
+
+In summary, I employ benchmark method 1, which involves summarizing brain_area, spks, and time into two numbers by averaging over spks and spks among active neurons.
+
+# Predictive modeling
+
+
+I fit a logistic regression on this data frame, using the feedback type as the outcome, and left contrast, right contrast, and average spks as the covariate. 
+
+```{r}
+fit1 <- glm(feedback_type~contrast_left+contrast_right+avg_spikes, data = session_bench, family="binomial")
+summary(fit1)
+
+```
+
+Model 1 suggests that the avg_spikes variable has a significant association with the feedback_type. The other predictor variables, do not show a significant association with the response variable.
+
+So the information of contrast_left and contrast_right are summarized into four factors in decision according to the scenrio because a same behavior in different scenrio results in different feedback_type.
+
+```{r}
+desicions <- c()
+for (j in 1:length(session_bench$contrast_left)){
+  if (session_bench$contrast_left[j] > session_bench$contrast_right[j]){
+      decision = '1' 
+  } else if (session_bench$contrast_left[j] < session_bench$contrast_right[j]){
+      decision = '2' 
+  } else if (session_bench$contrast_left[j] == session_bench$contrast_right[j] 
+             & session_bench$contrast_left[j] == 0){
+      decision = '3' 
+  } else{
+      decision = '4' 
+  }
+  desicions <- cbind(desicions, decision)
+} 
+
+session_bench$desicion <- as.factor(desicions)
+session_bench
+```
+
+I fit a logistic regression model on the data frame. The outcome variable is feedback_type, and the covariates included mouse_name, decision, n_brain_area, avg_spikes, and avg_active_neuron_spks. 
+
+```{r}
+fit2 <- glm(feedback_type~mouse_name + desicion + n_brain_area + avg_spikes + avg_active_neuron_spks, data = session_bench, family="binomial")
+summary(fit2)
+
+```
+
+And I performed stepwise variable selection (stepAIC) on the logistic regression model fit2 using both forward and backward selection directions.
+
+```{r}
+fit3 <- stepAIC(fit2, direction = "both")
+summary(fit3)
+```
+
+Clearly, Model2 and Model3 perform better than Model1. After variable selection, the following four variables, mouse_name, decision, n_brain_area, and avg_spikes, are found to be significant.
+
+# Prediction performance on the test sets
+
+The model's performance was evaluated using session 1 and session 18 as the test sets.
+
+```{r}
+session_1 <- subset(session_bench, session_ID==1)
+
+pred1 <- predict(fit1, session_1 %>% dplyr::select(-feedback_type), type = 'response')
+pred2 <- predict(fit2, session_1 %>% dplyr::select(-feedback_type), type = 'response')
+pred3 <- predict(fit3, session_1 %>% dplyr::select(-feedback_type), type = 'response')
+
+```
+
+```{r}
+find_best_threshold <- function(pred, actual, thresholds) {
+  best_threshold <- 0
+  min_error_rate <- Inf
+
+  for (threshold in thresholds) {
+    prediction <- ifelse(pred > threshold, '1', '-1')
+    error_rate <- mean(prediction != actual)
+
+    if (error_rate < min_error_rate) {
+      min_error_rate <- error_rate
+      best_threshold <- threshold
+    }
+  }
+
+  return(list(best_threshold = best_threshold, min_error_rate = min_error_rate))
+}
+
+thresholds <- seq(0.3, 0.8, by = 0.1)
+result <- find_best_threshold(pred1, session_1$feedback_type, thresholds)
+print("--Model 1--")
+print(paste("Best Threshold:", result$best_threshold))
+print(paste("Minimum Error Rate:", result$min_error_rate))
+
+```
+
+```{r}
+prediction1 <- as.factor(ifelse(pred1 > result$best_threshold, '1', '-1'))
+cm <- confusionMatrix(prediction1, session_1$feedback_type, dnn = c("Prediction", "Reference"))
+
+plt <- as.data.frame(cm$table)
+
+ggplot(plt, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1"))
+```
+
+
+```{r}
+thresholds <- seq(0.3, 0.8, by = 0.1)
+result <- find_best_threshold(pred2, session_1$feedback_type, thresholds)
+print("--Model 2--")
+print(paste("Best Threshold:", result$best_threshold))
+print(paste("Minimum Error Rate:", result$min_error_rate))
+```
+
+
+```{r}
+prediction2 <- as.factor(ifelse(pred2 > result$best_threshold, '1', '-1'))
+cm <- confusionMatrix(prediction2, session_1$feedback_type, dnn = c("Prediction", "Reference"))
+
+plt <- as.data.frame(cm$table)
+
+ggplot(plt, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1"))
+```
+
+
+```{r}
+thresholds <- seq(0.3, 0.8, by = 0.1)
+result <- find_best_threshold(pred3, session_1$feedback_type, thresholds)
+print("--Model 3--")
+print(paste("Best Threshold:", result$best_threshold))
+print(paste("Minimum Error Rate:", result$min_error_rate))
+```
+
+```{r}
+prediction3 <- as.factor(ifelse(pred3 > result$best_threshold, '1', '-1'))
+cm <- confusionMatrix(prediction3, session_1$feedback_type, dnn = c("Prediction", "Reference"))
+
+plt <- as.data.frame(cm$table)
+
+ggplot(plt, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1"))
+```
+
+The optimal prediction errors for the three models were 34%, 30%, and 31%, respectively. In terms of accuracy, Model2 is the best model for predicting session 1.
+
+```{r}
+# Model 1
+pr = prediction(pred1, session_1$feedback_type)
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+
+# Model 2
+pr = prediction(pred2, session_1$feedback_type)
+prf2 <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc2 <- performance(pr, measure = "auc")
+auc2 <- auc2@y.values[[1]]
+
+# Model 3
+pr = prediction(pred3, session_1$feedback_type)
+prf3 <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc3 <- performance(pr, measure = "auc")
+auc3 <- auc3@y.values[[1]]
+
+# Bias Guess
+pred0 = pred1 * 0 + 1
+pr = prediction(pred0, session_1$feedback_type)
+prf0 <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc0 <- performance(pr, measure = "auc")
+auc0 <- auc0@y.values[[1]]
+
+plot(prf2, ,col = 'red', main = 'ROC curve')
+plot(prf, add = TRUE, col = 'blue')
+plot(prf0, add = TRUE, col = 'green')
+plot(prf3, add = TRUE, col = 'purple')
+legend("bottomright", legend=c("Model 1", "Model 2", "Model 3", "Bias Guess"), col=c("blue", "red","purple", 'green'), lty=1:1, 
+       cex=0.8)
+```
+From ROC curve, we see that Mode 1, Model 2 and Model 3 have similar performance in Session 1.
+
+```{r}
+# AUC 
+print(c(auc, auc2, auc3, auc0))
+```
+
+From AUC, Model 1 is slgithly better than Model 2 and Model 3 for session 1.
+
+
+For Session 18: The optimal prediction errors for the three models were 19.5%, 19.0%, and 19.0%, respectively. Model 1 is just a naive predictor,and Model 3 predicts more success trails. In terms of accuracy, Model2 is the best model for predicting session 18. 
+
+
+```{r}
+session_18 <- subset(session_bench, session_ID==18)
+pred1 <- predict(fit1, session_18 %>% dplyr::select(-feedback_type), type = 'response')
+pred2 <- predict(fit2, session_18 %>% dplyr::select(-feedback_type), type = 'response')
+pred3 <- predict(fit3, session_18 %>% dplyr::select(-feedback_type), type = 'response')
+
+
+# Model 1
+pr = prediction(pred1, session_18$feedback_type)
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+
+# Model 2
+pr = prediction(pred2, session_18$feedback_type)
+prf2 <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc2 <- performance(pr, measure = "auc")
+auc2 <- auc2@y.values[[1]]
+
+# Model 3
+pr = prediction(pred3, session_18$feedback_type)
+prf3 <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc3 <- performance(pr, measure = "auc")
+auc3 <- auc3@y.values[[1]]
+
+# Bias Guess
+pred0 = pred1 * 0 + 1
+pr = prediction(pred0, session_18$feedback_type)
+prf0 <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc0 <- performance(pr, measure = "auc")
+auc0 <- auc0@y.values[[1]]
+
+plot(prf2, ,col = 'red', main = 'ROC curve')
+plot(prf, add = TRUE, col = 'blue')
+plot(prf0, add = TRUE, col = 'green')
+plot(prf3, add = TRUE, col = 'purple')
+legend("bottomright", legend=c("Model 1", "Model 2", "Model 3", "Bias Guess"), col=c("blue", "red","purple", 'green'), lty=1:1, 
+       cex=0.8)
+
+```
+
+From ROC curve, Model 2 and Model 3 is clearly better than Model 1 in session 18.
+
+
+```{r}
+# AUC 
+print(c(auc, auc2, auc3, auc0))
+```
+
+From AUC, Model 2 and Model 3 exhibit similar performance and are significantly better than Model 1.
+
+
+# Discussion
+
+- Constructing a decision variable from contrast_left and contrast_right has emerged as a significant feature in our preliminary analysis. Modeling different scenarios of success using diverse models may yield better results.
+
+- The method of summarizing brain_area, spks, and time by averaging does not effectively predict feedback type, but there are several potential avenues for improvement. And the variable `avg_active_neuron_spks` has no impact on the success of the trails.
+
+- Different datasets and models may have different optimal thresholds, and we need to perform iterative searches to obtain the most accurate estimates.
+
+- Considering that different mice have varying average success rates, I included the variable mouse_name in the model. To mitigate information loss resulting from the removal of brain_area variables, I added the variable n_brain. Based on comprehensive predictive results, Model 2, which includes mouse_name, decision, n_brain_area, and avg_spikes as independent variables, emerged as the optimal model.
+
+
